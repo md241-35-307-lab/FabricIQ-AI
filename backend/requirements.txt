@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pymysql
+cryptography
+python-dotenv
+python-multipart
+pydantic[email]
+bcrypt
+PyJWT
+pillow
+# optional, for real defect detection once you have trained weights:
+# ultralytics

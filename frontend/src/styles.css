@@ -1,0 +1,29 @@
+:root { --ink:#1b2a4a; --paper:#eef1f5; --thread:#e0a526; --bad:#b3261e; --line:#c9d0dc; }
+* { box-sizing: border-box; }
+body { margin:0; font:16px/1.5 system-ui, sans-serif; color:var(--ink); background:var(--paper); }
+header { display:flex; justify-content:space-between; align-items:center; gap:1rem; flex-wrap:wrap; padding:.75rem 1.5rem; background:var(--ink); color:#fff; }
+header nav button { background:none; color:#fff; border:0; padding:.4rem .8rem; border-bottom:3px solid transparent; }
+header nav button.on { border-color:var(--thread); }
+main { max-width:60rem; margin:0 auto; padding:1.5rem; }
+.auth { max-width:24rem; margin-top:10vh; }
+.auth h1 { font-size:2.6rem; margin:0; }
+.sub { margin-top:0; }
+label { display:block; margin:.75rem 0; font-weight:600; }
+input, textarea { display:block; width:100%; padding:.5rem; margin-top:.25rem; border:1px solid var(--line); border-radius:4px; font:inherit; }
+button { background:var(--ink); color:#fff; border:0; border-radius:4px; padding:.55rem 1rem; font:inherit; cursor:pointer; }
+button.link { background:none; color:var(--ink); text-decoration:underline; padding:0 .4rem; }
+header button.link { color:#fff; }
+button:focus-visible, input:focus-visible, textarea:focus-visible { outline:3px solid var(--thread); outline-offset:2px; }
+.msg { color:var(--bad); font-weight:600; }
+.result { display:grid; grid-template-columns:1fr 1fr; gap:1.5rem; margin-top:1rem; }
+.frame { position:relative; }
+.frame img { width:100%; display:block; }
+.box { position:absolute; border:2px solid var(--bad); }
+.score { font-size:2.4rem; margin:0; font-weight:700; }
+.score small { font-size:.9rem; font-weight:400; }
+.dets { padding-left:1.2rem; }
+table { width:100%; border-collapse:collapse; }
+th, td { text-align:left; padding:.5rem; border-bottom:1px solid var(--line); }
+.report { background:#fff; border:1px solid var(--line); padding:1rem; margin-top:1rem; }
+@media (max-width:700px) { .result { grid-template-columns:1fr; } }
+@media print { header, table, .stats, button { display:none; } }
