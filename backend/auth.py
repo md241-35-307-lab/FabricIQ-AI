@@ -39,4 +39,15 @@ def current_user(cred: HTTPAuthorizationCredentials = Depends(bearer), db: Sessi
     user = db.get(User, int(data["sub"]))
     if not user:
         raise HTTPException(401, "Account not found.")
+    if user.status != "active":
+        raise HTTPException(403, "This account is not active.")
     return user
+
+
+def require_roles(*roles):
+    """Role-based access control: allow only the listed roles."""
+    def dep(user: User = Depends(current_user)) -> User:
+        if user.role not in roles:
+            raise HTTPException(403, "Your role does not have permission for this action.")
+        return user
+    return dep

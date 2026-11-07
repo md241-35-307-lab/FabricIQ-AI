@@ -9,5 +9,5 @@ pydantic[email]
 bcrypt
 PyJWT
 pillow
-# optional, for real defect detection once you have trained weights:
-# ultralytics
+# YOLO defect detection (needed for backend/weights/defects.pt)
+ultralytics
