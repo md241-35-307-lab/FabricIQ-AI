@@ -91,7 +91,7 @@ export function Frame({ src, dets, w, h, hover, setHover, scanning, draw, onDraw
   );
 }
 
-export function DetList({ dets, onChange, editable, hover, setHover }) {
+export function DetList({ dets, onChange, editable, hover, setHover, low }) {
   const cls = useClassList(dets);
   return (
     <ul className="dets">
@@ -102,7 +102,8 @@ export function DetList({ dets, onChange, editable, hover, setHover }) {
             ? <select value={d.class} onChange={(e) => onChange(dets.map((x, j) => (j === i ? { ...x, class: e.target.value } : x)))}>{cls.map((c) => <option key={c}>{c}</option>)}</select>
             : <b>{d.class}</b>}
           {d.manual ? <em>manual</em> : <><span className="conf"><i style={{ width: `${Math.round(d.confidence * 100)}%` }} /></span>
-          <em>{Math.round(d.confidence * 100)}%</em></>}
+          <em>{Math.round(d.confidence * 100)}%</em>
+          {low != null && d.confidence < low && <span className="lowtag" title="Below the confidence threshold: check this one">low</span>}</>}
           {editable && <button type="button" className="icon-btn sm" aria-label="Remove defect" onClick={() => onChange(dets.filter((_, j) => j !== i))}><Icon n="x" size={16} /></button>}
         </li>
       ))}
@@ -116,6 +117,18 @@ export function DrawTools({ draw, setDraw, cls, setCls, list: all }) {
     <div className="drawbar">
       <button type="button" className={draw ? "btn sm" : "btn ghost sm"} onClick={() => setDraw(!draw)}>{draw ? "Drawing: drag on image" : "Draw missed defect"}</button>
       <select value={cls} onChange={(e) => setCls(e.target.value)} aria-label="Class for new box">{all.map((c) => <option key={c}>{c}</option>)}</select>
+    </div>
+  );
+}
+
+// FR-06: dominant colours estimated by the backend
+export function Colors({ colors }) {
+  if (!colors?.length) return null;
+  return (
+    <div className="colors">
+      <b>Dominant colors</b>
+      <ul>{colors.map((c) => <li key={c.hex}><i style={{ background: c.hex }} />{c.hex.toUpperCase()}<small>{c.percent}%</small></li>)}</ul>
+      <small>Estimated from the image; lighting changes how a color looks.</small>
     </div>
   );
 }

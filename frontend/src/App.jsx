@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { api, setToken } from "./api.js";
 import { Icon, Logo } from "./icons.jsx";
-import { ThemeToggle, ScoreRing, Frame, DetList, DrawTools, Chip, ago, useClassList } from "./ui.jsx";
+import { ThemeToggle, ScoreRing, Frame, DetList, DrawTools, Chip, Colors, ago, useClassList } from "./ui.jsx";
 
 const ROLES = {
   inspector: ["Quality Inspector", "Upload fabric, review AI-detected defects, save inspection records."],
@@ -210,6 +211,14 @@ function Inspect({ notify, onSaved }) {
       notify("Saved to the inspection record."); onSaved();
     } catch (err) { notify(err.message, "err"); }
   }
+  async function reject() {   // FR-08: the inspector does not accept the AI findings at all
+    if (!window.confirm("Reject this AI result? No defects will be kept for this inspection.")) return;
+    try {
+      setRes(await api(`/inspections/${res.id}/review`, { method: "PUT", json: { decision: "rejected", detections: [], notes } }));
+      setDets([]); setDraw(false);
+      notify("AI result rejected and saved."); onSaved();
+    } catch (err) { notify(err.message, "err"); }
+  }
   const reset = () => { setRes(null); setDets([]); setNotes(""); setDraw(false); };
   const a = res?.ai_results;
   const pending = res?.status === "pending";
@@ -239,14 +248,16 @@ function Inspect({ notify, onSaved }) {
         {!res ? <p className="muted">Detected defects, the visual score and your review controls will appear here after a scan.</p> : (
           <>
             <div className="score-row"><ScoreRing value={res.quality_score} size={116} />
-              <div><b>Visual score</b><small>AI estimate, not a lab measurement</small><Chip s={res.status} /></div></div>
+              <div><b>Visual score</b><small>{pending ? "AI estimate" : res.status === "rejected" ? "AI estimate (result rejected)" : "Recalculated from confirmed findings"}, not a lab measurement</small><Chip s={res.status} /></div></div>
             {!a.model_loaded && <p className="note"><Icon n="alert" size={16} /> Automatic detection is unavailable{a.model_error ? ` (${a.model_error})` : ""}. You can still draw defects manually and save.</p>}
-            {res.needs_review && <p className="note"><Icon n="alert" size={16} /> Human review required.</p>}
+            {pending && res.needs_review && <p className="note"><Icon n="alert" size={16} /> Human review required{a.model_loaded ? `: a detection is below ${Math.round((a.review_threshold ?? 0.5) * 100)}% confidence.` : "."}</p>}
+            <Colors colors={a.colors} />
             {pending && <DrawTools draw={draw} setDraw={setDraw} cls={drawCls} setCls={setNewCls} list={list} />}
-            <DetList dets={dets} onChange={setDets} editable={pending} hover={hover} setHover={setHover} />
+            <DetList dets={dets} onChange={setDets} editable={pending} hover={hover} setHover={setHover} low={pending ? a.review_threshold ?? 0.5 : null} />
             {pending && <button className="lnk" onClick={() => setDets(a.detections)}>Reset to AI result</button>}
             <label>Inspector notes<textarea value={notes} onChange={(e) => setNotes(e.target.value)} disabled={!pending} placeholder="Add context for this inspection" /></label>
             {pending && <button className="btn wide" onClick={save}><Icon n="check" size={16} />Confirm and save</button>}
+            {pending && <button className="btn ghost wide" onClick={reject}><Icon n="x" size={16} />Reject AI result</button>}
           </>
         )}
       </aside>
@@ -280,12 +291,12 @@ function Dashboard({ refreshKey, go }) {
       </div>
       <section className="card"><h3>Quality score</h3>
         <div className="center"><ScoreRing value={s.avg_score} size={140} /></div>
-        <p className="muted tc">Average across {s.total} inspection{s.total === 1 ? "" : "s"}</p></section>
+        <p className="muted tc">Average across {s.reviewed ?? s.total} reviewed inspection{(s.reviewed ?? s.total) === 1 ? "" : "s"}</p></section>
       <section className="card"><h3>Review status</h3>
         <div className="donut-row">
           <svg viewBox="0 0 36 36" className="donut" role="img" aria-label="Review status breakdown">
             <circle r="15.9155" cx="18" cy="18" className="trk" />
-            {[["confirmed", st.confirmed], ["corrected", st.corrected], ["pending", st.pending]].map(([k, v]) => {
+            {[["confirmed", st.confirmed], ["corrected", st.corrected], ["rejected", st.rejected], ["pending", st.pending]].map(([k, v]) => {
               const p = (v / total) * 100;
               const el = <circle key={k} r="15.9155" cx="18" cy="18" className={k} strokeDasharray={`${p} ${100 - p}`} strokeDashoffset={-off} />;
               off += p; return el;
@@ -293,9 +304,9 @@ function Dashboard({ refreshKey, go }) {
           </svg>
           <ul className="legend">{Object.entries(st).map(([k, v]) => <li key={k}><i className={k} />{k}<b>{v}</b></li>)}</ul>
         </div></section>
-      <section className="card"><h3>Defects by type</h3>
+      <section className="card"><h3>Confirmed defects by type</h3>
         {Object.entries(s.defects_by_class).map(([k, v]) => <div className="bar" key={k}><span>{k}</span><i style={{ width: `${(v / max) * 100}%` }} /><b>{v}</b></div>)}
-        {!Object.keys(s.defects_by_class).length && <p className="muted">No defects recorded yet.</p>}</section>
+        {!Object.keys(s.defects_by_class).length && <p className="muted">No confirmed defects yet.</p>}</section>
       <section className="card wide2"><h3>Score trend <small>last {scores.length || 0} inspections</small></h3>
         {scores.length > 1 ? <svg viewBox="0 0 100 40" className="spark" preserveAspectRatio="none"><polyline points={pts} /></svg> : <p className="muted">Needs at least two inspections.</p>}</section>
       <section className="card wide2"><h3>Recent activity</h3>
@@ -320,10 +331,11 @@ function History({ refreshKey, role, notify, onChange }) {
   const [edit, setEdit] = useState(null);
   const [draw, setDraw] = useState(false);
   const [newCls, setNewCls] = useState("");
+  const [sheet, setSheet] = useState(false);
 
   useEffect(() => { api("/inspections").then(setRows).catch(() => {}); }, [refreshKey]);
   useEffect(() => {
-    setReport(null); setEdit(null); setDraw(false);
+    setReport(null); setEdit(null); setDraw(false); setSheet(false);
     if (open && open.status !== "pending") api(`/inspections/${open.id}/report`).then(setReport).catch(() => {});
     const esc = (e) => e.key === "Escape" && setOpen(null);
     window.addEventListener("keydown", esc);
@@ -351,13 +363,13 @@ function History({ refreshKey, role, notify, onChange }) {
     <section>
       <div className="filters">
         <label className="search"><Icon n="search" size={18} /><input placeholder="Search by ID or inspector" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search inspections" /></label>
-        <div className="seg">{["all", "pending", "confirmed", "corrected"].map((x) => <button key={x} className={st === x ? "on" : ""} onClick={() => setSt(x)}>{x}</button>)}</div>
+        <div className="seg">{["all", "pending", "confirmed", "corrected", "rejected"].map((x) => <button key={x} className={st === x ? "on" : ""} onClick={() => setSt(x)}>{x}</button>)}</div>
       </div>
       <div className="grid">
         {shown.map((r) => (
           <button key={r.id} className="tile" onClick={() => setOpen(r)}>
             <img src={r.image} alt="" />
-            <span className="tile-top"><b>#{r.id}</b><Chip s={r.status} /></span>
+            <span className="tile-top"><b>#{r.id}</b>{r.status === "pending" && r.needs_review && <span className="warn-dot" title="Human review required"><Icon n="alert" size={14} /></span>}<Chip s={r.status} /></span>
             <span className="tile-meta"><ScoreRing value={r.quality_score} size={38} /><small>{r.inspector}<br />{ago(r.created_at)}</small></span>
           </button>
         ))}
@@ -372,7 +384,7 @@ function History({ refreshKey, role, notify, onChange }) {
               draw={!!edit && draw} onDraw={(box) => setEdit({ ...edit, dets: [...edit.dets, { class: drawCls, confidence: 1, manual: true, box }] })} />
             <div className="score-row"><ScoreRing value={open.quality_score} size={84} /><div><b>{open.inspector}</b><small>{new Date(open.created_at + "Z").toLocaleString()}</small></div></div>
             {edit && <DrawTools draw={draw} setDraw={setDraw} cls={drawCls} setCls={setNewCls} list={list} />}
-            <DetList dets={dets} onChange={(d) => setEdit({ ...edit, dets: d })} editable={!!edit} hover={hover} setHover={setHover} />
+            <DetList dets={dets} onChange={(d) => setEdit({ ...edit, dets: d })} editable={!!edit} hover={hover} setHover={setHover} low={open.status === "pending" ? open.ai_results.review_threshold ?? 0.5 : null} />
             {edit ? (
               <>
                 <label>Notes<textarea value={edit.notes} onChange={(e) => setEdit({ ...edit, notes: e.target.value })} /></label>
@@ -382,7 +394,7 @@ function History({ refreshKey, role, notify, onChange }) {
               <>
                 {report ? <p className="muted">Notes: {report.notes || "none"}<br /><small>{report.disclaimer}</small></p> : open.status === "pending" && <p className="muted">Not reviewed yet.</p>}
                 <div className="actions">
-                  <button className="btn" onClick={() => window.print()} disabled={!report}><Icon n="printer" size={16} />Print report</button>
+                  <button className="btn" onClick={() => setSheet(true)} disabled={!report}><Icon n="printer" size={16} />Open report</button>
                   {role === "inspector" && <button className="btn ghost" onClick={() => setEdit({ dets: open.reviewed_results ?? open.ai_results.detections, notes: open.notes || "" })}><Icon n="edit" size={16} />Edit</button>}
                   {(role === "inspector" || role === "admin") && <button className="btn danger" onClick={remove}><Icon n="trash" size={16} />Delete</button>}
                 </div>
@@ -391,7 +403,49 @@ function History({ refreshKey, role, notify, onChange }) {
           </div>
         </div>
       )}
+      {sheet && report && <ReportSheet r={report} onClose={() => setSheet(false)} />}
     </section>
+  );
+}
+
+/* ---------- Report (FR-10) ---------- */
+function ReportSheet({ r, onClose }) {
+  const when = (iso) => (iso ? new Date(iso + "Z").toLocaleString() : "–");
+  const defects = r.defects || [];
+  useEffect(() => {
+    const esc = (e) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, []);
+  return createPortal(
+    <div className="sheet-wrap" onClick={onClose}>
+      <article className="sheet" onClick={(e) => e.stopPropagation()} aria-label={`Inspection report ${r.inspection_id}`}>
+        <div className="sheet-bar">
+          <button className="btn sm" onClick={() => window.print()}><Icon n="printer" size={16} />Print / Save as PDF</button>
+          <button className="btn ghost sm" onClick={onClose}>Close</button>
+        </div>
+        <h1>FabricIQ AI inspection report</h1>
+        <dl className="facts">
+          <div><dt>Inspection</dt><dd>#{r.inspection_id}</dd></div>
+          <div><dt>Inspector</dt><dd>{r.inspector}</dd></div>
+          <div><dt>Inspection date</dt><dd>{when(r.date)}</dd></div>
+          <div><dt>Reviewed</dt><dd>{when(r.reviewed_at)}</dd></div>
+          <div><dt>Review outcome</dt><dd className="cap">{r.decision}</dd></div>
+          <div><dt>Visual score</dt><dd>{r.quality_score}{r.decision === "rejected" ? " (AI estimate; result rejected)" : ""}</dd></div>
+        </dl>
+        {r.width ? <Frame src={r.image} dets={defects} w={r.width} h={r.height} /> : <img src={r.image} alt="Inspected fabric" style={{ maxWidth: "100%" }} />}
+        <h3>Findings</h3>
+        {defects.length ? (
+          <table><thead><tr><th>#</th><th>Defect</th><th>Confidence</th><th>Location (x1, y1, x2, y2)</th></tr></thead>
+            <tbody>{defects.map((d, i) => <tr key={i}><td>{i + 1}</td><td>{d.class}</td><td>{d.manual ? "added by inspector" : `${Math.round(d.confidence * 100)}%`}</td><td>{d.box.map((v) => Math.round(v)).join(", ")}</td></tr>)}</tbody></table>
+        ) : <p>{r.decision === "rejected" ? "The inspector rejected the AI findings. No defects were kept." : "No defects recorded."}</p>}
+        <Colors colors={r.colors} />
+        <h3>Inspector notes</h3>
+        <p>{r.notes || "None"}</p>
+        <p className="fine">Score rule: {r.score_rule}<br />{r.disclaimer}</p>
+      </article>
+    </div>,
+    document.body
   );
 }
 
