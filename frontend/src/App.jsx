@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, setToken } from "./api.js";
 import { Icon, Logo } from "./icons.jsx";
-import { ThemeToggle, ScoreRing, Frame, DetList, Chip, ago } from "./ui.jsx";
+import { ThemeToggle, ScoreRing, Frame, DetList, DrawTools, Chip, ago, useClassList } from "./ui.jsx";
 
 const ROLES = {
   inspector: ["Quality Inspector", "Upload fabric, review AI-detected defects, save inspection records."],
@@ -107,13 +107,52 @@ function Auth({ mode, go, onLogin, notify }) {
 /* ---------- Workspace ---------- */
 function Camera({ onCapture, onClose }) {
   const v = useRef();
+  const [facing, setFacing] = useState("environment");
+  const [live, setLive] = useState(false);
+  const [dets, setDets] = useState([]);
+  const [dim, setDim] = useState({ w: 1, h: 1 });
+  const [info, setInfo] = useState("");
+  const [err, setErr] = useState("");
+
   useEffect(() => {
-    let s;
-    navigator.mediaDevices?.getUserMedia({ video: true })
-      .then((st) => { s = st; v.current.srcObject = st; })
-      .catch(() => onClose("Camera access was denied or no camera was found."));
-    return () => s?.getTracks().forEach((t) => t.stop());
-  }, []);
+    let s, dead = false;
+    navigator.mediaDevices?.getUserMedia({ video: { facingMode: { ideal: facing } } })
+      .then((st) => { if (dead) return st.getTracks().forEach((t) => t.stop()); s = st; v.current.srcObject = st; })
+      .catch(() => onClose("Camera access was denied or no camera was found. On a phone, open the site over HTTPS."));
+    return () => { dead = true; s?.getTracks().forEach((t) => t.stop()); };
+  }, [facing]);
+
+  // live detection: send a small frame, wait for the answer, then send the next one
+  useEffect(() => {
+    if (!live) { setDets([]); setInfo(""); return; }
+    let stop = false;
+    setErr("");
+    const tick = async () => {
+      const vid = v.current;
+      if (stop) return;
+      if (vid && vid.videoWidth) {
+        const sc = Math.min(1, 640 / vid.videoWidth);
+        const c = document.createElement("canvas");
+        c.width = vid.videoWidth * sc; c.height = vid.videoHeight * sc;
+        c.getContext("2d").drawImage(vid, 0, 0, c.width, c.height);
+        const blob = await new Promise((r) => c.toBlob(r, "image/jpeg", 0.8));
+        const form = new FormData(); form.append("file", new File([blob], "frame.jpg", { type: "image/jpeg" }));
+        const t0 = performance.now();
+        try {
+          const r = await api("/inspections/predict", { method: "POST", form });
+          if (!r.model_loaded) { if (!stop) { setErr(`Live detect needs the AI model: ${r.model_error || "not loaded"}`); setLive(false); } return; }
+          if (!stop) {
+            setDets(r.detections); setDim({ w: r.width, h: r.height });
+            setInfo(`${r.detections.length} defect(s) · ${Math.round(performance.now() - t0)} ms${r.model_loaded ? "" : " · no model loaded"}`);
+          }
+        } catch (e) { if (!stop) { setErr(e.message); setLive(false); } return; }
+      }
+      if (!stop) setTimeout(tick, 250);
+    };
+    tick();
+    return () => { stop = true; };
+  }, [live]);
+
   const snap = () => {
     const c = document.createElement("canvas");
     c.width = v.current.videoWidth; c.height = v.current.videoHeight;
@@ -121,9 +160,23 @@ function Camera({ onCapture, onClose }) {
     c.toBlob((b) => onCapture(new File([b], "capture.jpg", { type: "image/jpeg" })), "image/jpeg", 0.92);
   };
   return (
-    <div className="cam"><video ref={v} autoPlay playsInline muted />
-      <div className="cam-bar"><button className="btn" onClick={snap}><Icon n="camera" />Capture frame</button>
-        <button className="btn ghost dark" onClick={() => onClose()}>Cancel</button></div></div>
+    <div className="cam">
+      <div className="camview">
+        <video ref={v} autoPlay playsInline muted />
+        {live && info && <span className="live-info">{info}</span>}
+        {err && <span className="live-info err">{err}</span>}
+        {dets.map((d, i) => {
+          const [x1, y1, x2, y2] = d.box;
+          return <span key={i} className="box" style={{ left: `${(x1 / dim.w) * 100}%`, top: `${(y1 / dim.h) * 100}%`, width: `${((x2 - x1) / dim.w) * 100}%`, height: `${((y2 - y1) / dim.h) * 100}%` }}><em>{d.class} {Math.round(d.confidence * 100)}%</em></span>;
+        })}
+      </div>
+      <div className="cam-bar">
+        <button className="btn" onClick={snap}><Icon n="camera" />Capture and analyze</button>
+        <button className={live ? "btn" : "btn ghost dark"} onClick={() => setLive(!live)}><Icon n="pulse" />{live ? "Live detect: on" : "Live detect"}</button>
+        <button className="btn ghost dark" onClick={() => setFacing(facing === "environment" ? "user" : "environment")}>Flip camera</button>
+        <button className="btn ghost dark" onClick={() => onClose()}>Cancel</button>
+      </div>
+    </div>
   );
 }
 
@@ -135,6 +188,10 @@ function Inspect({ notify, onSaved }) {
   const [cam, setCam] = useState(false);
   const [drag, setDrag] = useState(false);
   const [hover, setHover] = useState(null);
+  const [draw, setDraw] = useState(false);
+  const [newCls, setNewCls] = useState("");
+  const list = useClassList(dets);
+  const drawCls = list.includes(newCls) ? newCls : list[0];
 
   async function run(file) {
     if (!file) return;
@@ -142,7 +199,7 @@ function Inspect({ notify, onSaved }) {
     const form = new FormData(); form.append("file", file);
     try {
       const r = await api("/inspections/analyze", { method: "POST", form });
-      setRes(r); setDets(r.ai_results.detections); setNotes("");
+      setRes(r); setDets(r.ai_results.detections); setNotes(""); setDraw(false);
     } catch (err) { notify(err.message, "err"); }
     setBusy(false);
   }
@@ -153,7 +210,7 @@ function Inspect({ notify, onSaved }) {
       notify("Saved to the inspection record."); onSaved();
     } catch (err) { notify(err.message, "err"); }
   }
-  const reset = () => { setRes(null); setDets([]); setNotes(""); };
+  const reset = () => { setRes(null); setDets([]); setNotes(""); setDraw(false); };
   const a = res?.ai_results;
   const pending = res?.status === "pending";
 
@@ -170,7 +227,8 @@ function Inspect({ notify, onSaved }) {
         <div className="canvas" onDragOver={(e) => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)}
           onDrop={(e) => { e.preventDefault(); setDrag(false); run(e.dataTransfer.files[0]); }}>
           {cam ? <Camera onCapture={run} onClose={(m) => { setCam(false); m && notify(m, "err"); }} />
-            : res ? <Frame src={res.image} dets={dets} w={a.width} h={a.height} hover={hover} setHover={setHover} scanning={busy} />
+            : res ? <Frame src={res.image} dets={dets} w={a.width} h={a.height} hover={hover} setHover={setHover} scanning={busy}
+              draw={pending && draw} onDraw={(box) => setDets([...dets, { class: drawCls, confidence: 1, manual: true, box }])} />
             : <div className={drag ? "drop on" : "drop"}>
                 {busy ? <><span className="orb" /><b>Analyzing fabric…</b></> : <><Icon n="scan" size={44} /><b>Drop a fabric image here</b><small>JPG or PNG, up to 5 MB, or use the live camera</small></>}
               </div>}
@@ -182,8 +240,9 @@ function Inspect({ notify, onSaved }) {
           <>
             <div className="score-row"><ScoreRing value={res.quality_score} size={116} />
               <div><b>Visual score</b><small>AI estimate, not a lab measurement</small><Chip s={res.status} /></div></div>
-            {!a.model_loaded && <p className="note"><Icon n="alert" size={16} /> No trained model is loaded, so nothing was detected.</p>}
+            {!a.model_loaded && <p className="note"><Icon n="alert" size={16} /> Automatic detection is unavailable{a.model_error ? ` (${a.model_error})` : ""}. You can still draw defects manually and save.</p>}
             {res.needs_review && <p className="note"><Icon n="alert" size={16} /> Human review required.</p>}
+            {pending && <DrawTools draw={draw} setDraw={setDraw} cls={drawCls} setCls={setNewCls} list={list} />}
             <DetList dets={dets} onChange={setDets} editable={pending} hover={hover} setHover={setHover} />
             {pending && <button className="lnk" onClick={() => setDets(a.detections)}>Reset to AI result</button>}
             <label>Inspector notes<textarea value={notes} onChange={(e) => setNotes(e.target.value)} disabled={!pending} placeholder="Add context for this inspection" /></label>
@@ -259,10 +318,12 @@ function History({ refreshKey, role, notify, onChange }) {
   const [report, setReport] = useState(null);
   const [hover, setHover] = useState(null);
   const [edit, setEdit] = useState(null);
+  const [draw, setDraw] = useState(false);
+  const [newCls, setNewCls] = useState("");
 
   useEffect(() => { api("/inspections").then(setRows).catch(() => {}); }, [refreshKey]);
   useEffect(() => {
-    setReport(null); setEdit(null);
+    setReport(null); setEdit(null); setDraw(false);
     if (open && open.status !== "pending") api(`/inspections/${open.id}/report`).then(setReport).catch(() => {});
     const esc = (e) => e.key === "Escape" && setOpen(null);
     window.addEventListener("keydown", esc);
@@ -284,6 +345,8 @@ function History({ refreshKey, role, notify, onChange }) {
 
   const shown = rows.filter((r) => (st === "all" || r.status === st) && `${r.id} ${r.inspector}`.toLowerCase().includes(q.toLowerCase()));
   const dets = open ? (edit ? edit.dets : open.reviewed_results ?? open.ai_results.detections) : [];
+  const list = useClassList(dets);
+  const drawCls = list.includes(newCls) ? newCls : list[0];
   return (
     <section>
       <div className="filters">
@@ -305,8 +368,10 @@ function History({ refreshKey, role, notify, onChange }) {
           <div className="drawer" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={`Inspection ${open.id}`}>
             <div className="d-head"><h3>Inspection #{open.id}</h3><Chip s={open.status} />
               <button className="icon-btn" onClick={() => setOpen(null)} aria-label="Close"><Icon n="x" /></button></div>
-            <Frame src={open.image} dets={dets} w={open.ai_results.width} h={open.ai_results.height} hover={hover} setHover={setHover} />
+            <Frame src={open.image} dets={dets} w={open.ai_results.width} h={open.ai_results.height} hover={hover} setHover={setHover}
+              draw={!!edit && draw} onDraw={(box) => setEdit({ ...edit, dets: [...edit.dets, { class: drawCls, confidence: 1, manual: true, box }] })} />
             <div className="score-row"><ScoreRing value={open.quality_score} size={84} /><div><b>{open.inspector}</b><small>{new Date(open.created_at + "Z").toLocaleString()}</small></div></div>
+            {edit && <DrawTools draw={draw} setDraw={setDraw} cls={drawCls} setCls={setNewCls} list={list} />}
             <DetList dets={dets} onChange={(d) => setEdit({ ...edit, dets: d })} editable={!!edit} hover={hover} setHover={setHover} />
             {edit ? (
               <>

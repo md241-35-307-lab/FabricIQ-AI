@@ -1,4 +1,4 @@
-import os, uuid
+import os, tempfile, traceback, uuid
 from datetime import datetime
 from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -53,9 +53,10 @@ async def analyze(file: UploadFile = File(...), db: Session = Depends(get_db),
         f.write(data)
     try:
         result = ai.analyze(path)
-    except Exception:
+    except Exception as e:
+        traceback.print_exc()   # full error in the backend terminal
         os.remove(path)
-        raise HTTPException(422, "Could not read this image. Try a different file.")
+        raise HTTPException(422, f"Detection failed: {type(e).__name__}: {e}")
     row = Inspection(user_id=user.id, image_path=path, ai_results=result,
                      quality_score=result["quality_score"], needs_review=int(result["needs_review"]))
     db.add(row); db.commit(); db.refresh(row)
@@ -85,6 +86,18 @@ def history(db: Session = Depends(get_db), user: User = Depends(current_user)):
     names = {u.id: u.name for u in db.query(User.id, User.name)}
     rows = _scope(db.query(Inspection), user).order_by(Inspection.created_at.desc()).limit(200)
     return [_out(i, names) for i in rows]
+
+
+@router.get("/classes")
+def classes(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """Class names for the draw-box list: the model's own classes plus any class seen in saved results."""
+    m = ai._load()
+    names = [m.names[i] for i in sorted(m.names)] if m else []
+    for i in db.query(Inspection).all():
+        for d in (i.reviewed_results or i.ai_results.get("detections", [])):
+            if d["class"] not in names:
+                names.append(d["class"])
+    return {"classes": names}
 
 
 @router.get("/stats")
@@ -121,3 +134,24 @@ def delete(iid: int, db: Session = Depends(get_db), user: User = Depends(require
     if os.path.exists(path):
         os.remove(path)
     return {"deleted": iid}
+
+
+# Real-time camera preview: detect only, nothing is saved to the database
+@router.post("/predict")
+def predict(file: UploadFile = File(...), user: User = Depends(require_roles("inspector"))):
+    if file.content_type not in ALLOWED:
+        raise HTTPException(415, "Only JPG or PNG images are supported.")
+    data = file.file.read()
+    if len(data) > MAX_BYTES:
+        raise HTTPException(413, "Image is larger than 5 MB.")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ALLOWED[file.content_type]) as f:
+        f.write(data)
+    try:
+        r = ai.analyze(f.name)
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(422, f"Detection failed: {type(e).__name__}: {e}")
+    finally:
+        os.remove(f.name)
+    return {"width": r["width"], "height": r["height"], "detections": r["detections"],
+            "model_loaded": r["model_loaded"], "model_error": r["model_error"]}
