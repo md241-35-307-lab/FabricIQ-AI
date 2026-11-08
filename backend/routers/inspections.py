@@ -17,11 +17,11 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 def _scope(q, user: User):
-    """Who can see what: inspector = own, designer = reviewed only, manager/admin = all."""
+    """Who can see what: inspector = own, designer = confirmed/corrected only, manager/admin = all."""
     if user.role == "inspector":
         return q.filter(Inspection.user_id == user.id)
     if user.role == "designer":
-        return q.filter(Inspection.status != "pending")
+        return q.filter(Inspection.status.in_(["confirmed", "corrected"]))
     return q
 
 
@@ -39,7 +39,7 @@ def _out(i: Inspection, names=None):
             "inspector": (names or {}).get(i.user_id)}
 
 
-# FR-03/04/05/07/14 — inspectors only
+# FR-03/04/05/06/07/11 — inspectors only
 @router.post("/analyze", status_code=201)
 async def analyze(file: UploadFile = File(...), db: Session = Depends(get_db),
                   user: User = Depends(require_roles("inspector"))):
@@ -64,17 +64,23 @@ async def analyze(file: UploadFile = File(...), db: Session = Depends(get_db),
 
 
 class ReviewIn(BaseModel):
-    decision: Literal["confirmed", "corrected"]
-    detections: list[dict]
+    decision: Literal["confirmed", "corrected", "rejected"]
+    detections: list[dict] = []
     notes: str | None = None
 
 
-# FR-08/11 — only the inspector who owns the record
+# FR-08 — only the inspector who owns the record: confirm, correct or reject the AI findings
 @router.put("/{iid}/review")
 def review(iid: int, body: ReviewIn, db: Session = Depends(get_db),
            user: User = Depends(require_roles("inspector"))):
     i = _get(db, user, iid)
-    i.status, i.reviewed_results, i.notes = body.decision, body.detections, body.notes
+    if body.decision == "rejected":
+        # AI findings are not accepted: nothing is kept as a defect, and the AI score stays as it was
+        i.status, i.reviewed_results = "rejected", []
+    else:
+        i.status, i.reviewed_results = body.decision, body.detections
+        i.quality_score = ai.reviewed_score(body.detections)      # FR-07: recalculated from confirmed findings
+    i.notes = body.notes
     i.reviewed_at = datetime.utcnow()
     db.commit(); db.refresh(i)
     return _out(i, {user.id: user.name})
@@ -102,26 +108,36 @@ def classes(db: Session = Depends(get_db), user: User = Depends(current_user)):
 
 @router.get("/stats")
 def stats(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """FR-12: number of inspections and counts of *confirmed* defect categories.
+
+    Only reviewed (confirmed/corrected) records feed the defect counts and the average score;
+    pending and rejected records are counted in by_status but their AI findings are not."""
     rows = _scope(db.query(Inspection), user).all()
-    counts, by_status = {}, {"pending": 0, "confirmed": 0, "corrected": 0}
+    counts, by_status = {}, {"pending": 0, "confirmed": 0, "corrected": 0, "rejected": 0}
+    reviewed = [r for r in rows if r.status in ("confirmed", "corrected")]
     for r in rows:
         by_status[r.status] = by_status.get(r.status, 0) + 1
-        for d in (r.reviewed_results if r.reviewed_results is not None else r.ai_results["detections"]):
+    for r in reviewed:
+        for d in (r.reviewed_results or []):
             counts[d["class"]] = counts.get(d["class"], 0) + 1
-    avg = round(sum(r.quality_score for r in rows) / len(rows), 1) if rows else None
-    return {"total": len(rows), "avg_score": avg, "defects_by_class": counts, "by_status": by_status}
+    avg = round(sum(r.quality_score for r in reviewed) / len(reviewed), 1) if reviewed else None
+    return {"total": len(rows), "reviewed": len(reviewed), "avg_score": avg,
+            "defects_by_class": counts, "by_status": by_status}
 
 
-# FR-13 — report from saved data
+# FR-10 — report from saved data
 @router.get("/{iid}/report")
 def report(iid: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
     i = _get(db, user, iid)
     if i.status == "pending":
         raise HTTPException(409, "Review and save this inspection before generating a report.")
     owner = db.get(User, i.user_id)
+    a = i.ai_results or {}
     return {"inspection_id": i.id, "inspector": owner.name, "date": i.created_at.isoformat(),
-            "reviewed_at": i.reviewed_at.isoformat(), "decision": i.status,
-            "quality_score": i.quality_score, "defects": i.reviewed_results, "notes": i.notes,
+            "reviewed_at": i.reviewed_at.isoformat() if i.reviewed_at else None, "decision": i.status,
+            "image": f"/uploads/{os.path.basename(i.image_path)}", "width": a.get("width"), "height": a.get("height"),
+            "quality_score": i.quality_score, "score_rule": ai.SCORE_RULE, "colors": a.get("colors", []),
+            "defects": i.reviewed_results, "notes": i.notes,
             "disclaimer": "AI output is a visual estimate and requires human judgment."}
 
 

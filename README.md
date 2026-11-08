@@ -18,19 +18,27 @@ cd frontend && npm install && npm run dev   # http://localhost:5173
 Place trained YOLO weights at `backend/weights/defects.pt` (and `pip install ultralytics`).
 Without weights the app runs, but reports that no model is loaded and detects nothing.
 
-## FR coverage
-FR-01 register/login · FR-03/04/05/07/14 analyze · FR-08/11 review + save · FR-12 history/stats · FR-13 report
+## FR coverage (numbers follow the approved SRS)
 
-## Roles and access
-Register as **inspector** (active immediately), **manager** or **designer** (need admin approval). Admins cannot self-register.
-
-**Existing database?** Run once: `ALTER TABLE users ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'active';`
-
-**Create the first admin:** `cd backend && python create_admin.py` (password is typed at the prompt).
-
-| Role | Can do |
+| FR | Where |
 |---|---|
-| inspector | upload / camera, review and save own inspections, own history and dashboard |
-| manager | read-only: all inspections, reports, dashboard |
-| designer | read-only: reviewed inspections (fabric gallery), dashboard |
-| admin | approve, disable and re-role users, plus all read access |
+| FR-01 login, FR-02 roles | `backend/auth.py`, `routers/auth_routes.py`, `routers/admin.py` |
+| FR-03 image input | upload / camera on the Workspace page, `POST /inspections/analyze` |
+| FR-04 detection, FR-05 boxes + confidence | `backend/ai.py` (YOLO weights in `backend/weights/defects.pt`) |
+| FR-06 dominant colours | `backend/color.py` (OpenCV k-means, 3 colours, stored in `ai_results.colors`) |
+| FR-07 visual score | `backend/ai.py`: see the rule below |
+| FR-08 confirm / correct / reject | `PUT /inspections/{id}/review` (`decision` = confirmed, corrected or rejected) |
+| FR-09 history | `GET /inspections`, History page |
+| FR-10 report | `GET /inspections/{id}/report`, "Open report" in History (printable) |
+| FR-11 confidence warning | `LOW_CONF` in `.env` (default 0.5); flags the inspection and each low-confidence defect |
+| FR-12 statistics | `GET /inspections/stats` (confirmed defect counts only) |
+
+### Visual score rule (FR-07)
+
+Start at 100, subtract 10 points per defect, minimum 0.
+
+- AI result (before review): each defect counts 10 x its confidence.
+- After the inspector confirms or corrects: every remaining defect counts the full 10, because a person accepted it (manually drawn defects too). The score is recalculated on save.
+- A rejected inspection keeps the AI score for reference but is left out of the average and the defect counts.
+
+The score is a triage estimate, not a certified textile-quality measurement.

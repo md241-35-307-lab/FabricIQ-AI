@@ -9,5 +9,7 @@ pydantic[email]
 bcrypt
 PyJWT
 pillow
+opencv-python   # FR-06 colour estimation (also installed by ultralytics)
+numpy
 # YOLO defect detection (needed for backend/weights/defects.pt)
 ultralytics

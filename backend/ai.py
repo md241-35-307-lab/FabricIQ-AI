@@ -8,7 +8,7 @@ import os
 from PIL import Image
 
 WEIGHTS = os.getenv("YOLO_WEIGHTS", "weights/defects.pt")
-LOW_CONF = 0.5                                  # below this -> human review (FR-14)
+LOW_CONF = float(os.getenv("LOW_CONF", "0.5"))  # FR-11: below this confidence -> human review required
 CONF = float(os.getenv("YOLO_CONF", "0.25"))    # detection threshold, tune with ml/evaluate.py
 IMGSZ = int(os.getenv("YOLO_IMGSZ", "640"))
 _model = None
@@ -30,6 +30,34 @@ def _load():
     return _model
 
 
+# ---- FR-07: preliminary visual score (rule-based, documented) -------------------------------------
+# Start at 100 and subtract PENALTY points per defect, never going below 0.
+#   * Before review (AI result):  penalty = PENALTY x the model's confidence for that defect.
+#   * After review (human-confirmed findings): every remaining defect counts fully, penalty = PENALTY,
+#     because an inspector has accepted it (a manually drawn defect is treated the same way).
+# The score is an estimate for triage, not a certified textile-quality measurement.
+PENALTY = 10
+SCORE_RULE = (f"100 minus {PENALTY} points per defect (AI result: weighted by confidence; "
+              f"reviewed result: full weight), minimum 0.")
+
+
+def ai_score(dets: list) -> float:
+    return max(0.0, round(100 - sum(PENALTY * d["confidence"] for d in dets), 1))
+
+
+def reviewed_score(dets: list) -> float:
+    return max(0.0, round(100 - PENALTY * len(dets), 1))
+
+
+def colors_of(path: str) -> list:
+    try:
+        from color import dominant_colors
+        return dominant_colors(path)
+    except Exception as e:                       # colours are extra information; never fail the scan for them
+        print("Colour estimation failed:", e)
+        return []
+
+
 def analyze(path: str) -> dict:
     w, h = Image.open(path).size          # raises for unreadable images (real input error)
     model = _load()
@@ -47,8 +75,8 @@ def analyze(path: str) -> dict:
             dets, error = [], f"{type(e).__name__}: {str(e)[:160]}"
             print("AI inference failed:", e)
     ok = bool(model) and error is None
-    # transparent rule-based score: -10 per defect weighted by confidence
-    score = max(0.0, round(100 - sum(10 * d["confidence"] for d in dets), 1))
-    needs_review = (not ok) or any(d["confidence"] < LOW_CONF for d in dets)
+    score = ai_score(dets)                                                    # FR-07
+    needs_review = (not ok) or any(d["confidence"] < LOW_CONF for d in dets)  # FR-11
     return {"width": w, "height": h, "detections": dets, "model_loaded": ok, "model_error": error,
-            "quality_score": score, "needs_review": needs_review}
+            "quality_score": score, "needs_review": needs_review, "review_threshold": LOW_CONF,
+            "colors": colors_of(path)}                                        # FR-06
